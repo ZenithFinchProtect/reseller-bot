@@ -6,6 +6,8 @@ lets each reseller server subscribe its own channel to recurring stock updates.
 ## Commands
 
 - `/stock` - live stock snapshot (counts capped, default 5)
+- `/test` - health check: bot latency, NFA API reachability, and (if set) posts a
+  test update to this server's webhook
 - `/stock-url <webhook_url>` - paste a Discord webhook URL and recurring stock
   updates post there (requires **Manage Server**). Create the webhook in
   *Server Settings → Integrations → Webhooks → Copy Webhook URL*, then paste it.

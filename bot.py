@@ -4,6 +4,7 @@ Self-serve tools for resellers against the NFA API, plus per-server stock
 update webhooks the bot manages for you.
 
   /stock              - live stock snapshot (capped)
+  /test               - health check (bot, NFA API, this server's webhook)
   /stock-url <url>    - paste a Discord webhook URL; updates post there
   /webhook-settings    - choose which games show, the cap, hide out-of-stock,
                         and how often updates send
@@ -578,6 +579,39 @@ async def buy(interaction: discord.Interaction):
         "reseller website \u2014 you'll be able to top up there and buy here.",
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="test", description="Health check: bot, NFA API, and this server's webhook")
+@app_commands.guild_only()
+async def test(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    lines = [f"\U0001F7E2 Bot online \u2014 latency **{round(bot.latency * 1000)}ms**"]
+
+    # NFA API
+    if _no_key():
+        lines.append("\u26A0\uFE0F NFA API: `NFA_API_KEY` not set")
+    else:
+        try:
+            stock = await bot.fetch_stock()
+            total = sum(int(v) for v in stock.values() if str(v).lstrip("-").isdigit())
+            lines.append(f"\u2705 NFA API reachable \u2014 {len(stock)} product(s), {total} total in stock")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"\u274C NFA API error: {exc}")
+
+    # This server's webhook
+    sub = await bot.db.get_subscription(interaction.guild_id)
+    if sub is None:
+        lines.append("\u2139\uFE0F No stock webhook set here yet (use `/stock-url`)")
+    else:
+        try:
+            stock = await bot.fetch_stock()
+            await bot.post_to_webhook(sub["webhook_url"], embed_for_sub(stock, sub))
+            await bot.db.mark_sent(interaction.guild_id)
+            lines.append(f"\u2705 Webhook works \u2014 sent a test update (every {sub_interval(sub)} min)")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"\u274C Webhook failed: {exc}")
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
 @bot.tree.error
