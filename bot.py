@@ -622,7 +622,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         msg = "You can't use that command here."
     else:
         log.exception("command error: %s", error)
-        msg = "Something went wrong running that command."
+        cause = getattr(error, "original", error)
+        msg = f"Something went wrong running that command: `{type(cause).__name__}: {cause}`"[:1900]
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
