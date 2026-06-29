@@ -164,11 +164,19 @@ class ResellerBot(commands.Bot):
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info("Slash commands synced to guild %s", config.GUILD_ID)
+            synced = await self.tree.sync(guild=guild)
+            log.info("Synced %d command(s) to guild %s", len(synced), config.GUILD_ID)
+            # Drop any stale GLOBAL commands so the guild copies are authoritative
+            # (prevents CommandSignatureMismatch from an old global registration).
+            self.tree.clear_commands(guild=None)
+            try:
+                await self.tree.sync()
+                log.info("Cleared stale global commands")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Could not clear global commands: %s", exc)
         else:
-            await self.tree.sync()
-            log.info("Slash commands synced globally (up to ~1h first time)")
+            synced = await self.tree.sync()
+            log.info("Synced %d command(s) globally (up to ~1h to appear)", len(synced))
         self.stock_tick.start()
 
     async def close(self):
