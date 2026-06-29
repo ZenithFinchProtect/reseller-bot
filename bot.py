@@ -161,22 +161,16 @@ class ResellerBot(commands.Bot):
     async def setup_hook(self):
         await self.db.connect()
         self.session = aiohttp.ClientSession()
+        # Always keep the commands registered globally (so the bot can handle
+        # interactions in any scope). If GUILD_ID is set, also register them to
+        # that guild for instant availability.
+        synced = await self.tree.sync()
+        log.info("Synced %d command(s) globally", len(synced))
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            log.info("Synced %d command(s) to guild %s", len(synced), config.GUILD_ID)
-            # Drop any stale GLOBAL commands so the guild copies are authoritative
-            # (prevents CommandSignatureMismatch from an old global registration).
-            self.tree.clear_commands(guild=None)
-            try:
-                await self.tree.sync()
-                log.info("Cleared stale global commands")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Could not clear global commands: %s", exc)
-        else:
-            synced = await self.tree.sync()
-            log.info("Synced %d command(s) globally (up to ~1h to appear)", len(synced))
+            gsynced = await self.tree.sync(guild=guild)
+            log.info("Synced %d command(s) to guild %s", len(gsynced), config.GUILD_ID)
         self.stock_tick.start()
 
     async def close(self):
