@@ -4,11 +4,10 @@ Self-serve tools for resellers against the NFA API, plus per-server stock
 update webhooks the bot manages for you.
 
   /stock              - live stock snapshot (capped)
-  /stock-url          - bot creates a webhook in THIS channel and starts updates
-  /stock-paste <url>  - register an existing Discord webhook instead
+  /stock-url <url>    - paste a Discord webhook URL; updates post there
   /webhook-settings    - choose which games show, the cap, hide out-of-stock,
                         and how often updates send
-  /stock-stop         - stop updates and delete the managed webhook
+  /stock-stop         - stop updates for this server
   /check <key>        - re-validate an activated key
   /replace <key>      - replace an invalid key within the 3-hour warranty
   /delete <key>       - delete an unactivated key
@@ -398,71 +397,30 @@ async def stock(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="stock-url",
-    description="Create a webhook in THIS channel and start stock updates here",
+    description="Paste a Discord webhook URL and stock updates will post there",
 )
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(manage_guild=True)
-async def stock_url(interaction: discord.Interaction):
+@app_commands.describe(
+    webhook_url="Your Discord webhook URL (Channel/Server Settings > Integrations > Webhooks > Copy URL)"
+)
+async def stock_url(interaction: discord.Interaction, webhook_url: str):
     if _no_key():
         await interaction.response.send_message(
             "Not configured yet (an admin must set `NFA_API_KEY`).", ephemeral=True
         )
         return
-    channel = interaction.channel
-    me = interaction.guild.me
-    if not channel.permissions_for(me).manage_webhooks:
+    webhook_url = webhook_url.strip()
+    if not WEBHOOK_RE.match(webhook_url):
         await interaction.response.send_message(
-            "I need the **Manage Webhooks** permission in this channel to create the "
-            "webhook. Give me that permission and run `/stock-url` again, or use "
-            "`/stock-paste` with a webhook URL you create yourself.",
+            "That doesn't look like a Discord webhook URL. In Discord open "
+            "**Server Settings \u2192 Integrations \u2192 Webhooks**, create one for the "
+            "channel you want, click **Copy Webhook URL**, and paste it here.",
             ephemeral=True,
         )
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        existing = await bot.db.get_subscription(interaction.guild_id)
-        webhook = await channel.create_webhook(name=config.WEBHOOK_USERNAME)
-        await bot.db.set_subscription(interaction.guild_id, webhook.url, interaction.user.id)
-        stock_data = await bot.fetch_stock()
-        sub = await bot.db.get_subscription(interaction.guild_id)
-        await bot.post_to_webhook(webhook.url, embed_for_sub(stock_data, sub))
-        await bot.db.mark_sent(interaction.guild_id)
-    except discord.Forbidden:
-        await interaction.followup.send(
-            "I couldn't create a webhook here (missing permission).", ephemeral=True
-        )
-        return
-    except Exception as exc:  # noqa: BLE001
-        await interaction.followup.send(f"Something went wrong: {exc}", ephemeral=True)
-        return
-    note = (
-        " (replaced the previous webhook for this server)"
-        if existing
-        else ""
-    )
-    await interaction.followup.send(
-        f"\u2705 Done! Stock updates will post in {channel.mention} every "
-        f"**{sub_interval(sub)} min**{note}. Use `/webhook-settings` to customise what "
-        f"shows and how often, or `/stock-stop` to turn it off.",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(
-    name="stock-paste",
-    description="Register an existing Discord webhook URL for stock updates",
-)
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(webhook_url="A Discord webhook URL (Server Settings > Integrations > Webhooks)")
-async def stock_paste(interaction: discord.Interaction, webhook_url: str):
-    webhook_url = webhook_url.strip()
-    if not WEBHOOK_RE.match(webhook_url):
-        await interaction.response.send_message(
-            "That doesn't look like a Discord webhook URL.", ephemeral=True
-        )
-        return
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    existing = await bot.db.get_subscription(interaction.guild_id)
     try:
         await bot.db.set_subscription(interaction.guild_id, webhook_url, interaction.user.id)
         stock_data = await bot.fetch_stock()
@@ -470,15 +428,20 @@ async def stock_paste(interaction: discord.Interaction, webhook_url: str):
         await bot.post_to_webhook(webhook_url, embed_for_sub(stock_data, sub))
         await bot.db.mark_sent(interaction.guild_id)
     except Exception:  # noqa: BLE001
-        await bot.db.remove_subscription(interaction.guild_id)
+        # Roll back so a bad URL doesn't leave a broken subscription.
+        if existing is None:
+            await bot.db.remove_subscription(interaction.guild_id)
         await interaction.followup.send(
-            "Couldn't post to that webhook (is the URL correct?). Nothing was saved.",
+            "Couldn't post to that webhook (is the URL correct and the channel "
+            "still there?). Nothing was saved.",
             ephemeral=True,
         )
         return
+    note = " (replaced the previous webhook for this server)" if existing else ""
     await interaction.followup.send(
-        f"\u2705 Registered. Updates send every **{sub_interval(sub)} min**. "
-        f"Use `/webhook-settings` to customise.",
+        f"\u2705 Done! A first update was just posted, and stock updates will send "
+        f"every **{sub_interval(sub)} min**{note}. Use `/webhook-settings` to choose "
+        f"what shows and how often, or `/stock-stop` to turn it off.",
         ephemeral=True,
     )
 
@@ -493,8 +456,8 @@ async def webhook_settings(interaction: discord.Interaction):
     sub = await bot.db.get_subscription(interaction.guild_id)
     if sub is None:
         await interaction.response.send_message(
-            "This server isn't getting stock updates yet. Run `/stock-url` in the "
-            "channel you want them in first.",
+            "This server isn't getting stock updates yet. Paste a webhook with "
+            "`/stock-url` first.",
             ephemeral=True,
         )
         return
@@ -514,15 +477,11 @@ async def stock_stop(interaction: discord.Interaction):
             "This server wasn't receiving stock updates.", ephemeral=True
         )
         return
-    # Best-effort delete of a webhook we manage.
-    try:
-        wh = discord.Webhook.from_url(sub["webhook_url"], session=bot.session)
-        await wh.delete()
-    except Exception:  # noqa: BLE001
-        pass
     await bot.db.remove_subscription(interaction.guild_id)
     await interaction.response.send_message(
-        "Stock updates turned off for this server.", ephemeral=True
+        "Stock updates turned off for this server. (Your webhook still exists in "
+        "Discord — delete it there if you want it gone.)",
+        ephemeral=True,
     )
 
 

@@ -6,15 +6,14 @@ lets each reseller server subscribe its own channel to recurring stock updates.
 ## Commands
 
 - `/stock` - live stock snapshot (counts capped, default 5)
-- `/stock-url` - the bot **creates a webhook in the current channel** and starts
-  posting recurring stock updates there (requires **Manage Server**; the bot
-  needs **Manage Webhooks** in that channel). No copy-paste needed.
-- `/stock-paste <webhook_url>` - register an existing Discord webhook URL instead
-  (for channels where the bot can't create one).
+- `/stock-url <webhook_url>` - paste a Discord webhook URL and recurring stock
+  updates post there (requires **Manage Server**). Create the webhook in
+  *Server Settings → Integrations → Webhooks → Copy Webhook URL*, then paste it.
+  A first update is sent immediately to confirm it works.
 - `/webhook-settings` - interactive panel to customise the updates for this
   server: which **games** show, the display **cap**, **show/hide out-of-stock**
   rows, and **how often** updates send. Also has a "Send update now" button.
-- `/stock-stop` - stop updates and delete the managed webhook
+- `/stock-stop` - stop updates for this server
 - `/check <key>` - re-validate an activated key
 - `/replace <key>` - replace an invalid key within the 3-hour warranty
 - `/delete <key>` - delete an unactivated key (removes it from stock)
@@ -29,7 +28,7 @@ every minute and sends to each server on its own schedule.
 
 1. Create a bot application at https://discord.com/developers/applications
    (Bot → Reset Token). Invite it with scopes `bot` + `applications.commands`
-   and permissions `Send Messages` + `Manage Webhooks` (needed for `/stock-url`).
+   and permission `Send Messages`.
 2. Copy `.env.example` to `.env` and fill in `DISCORD_TOKEN`, `NFA_API_KEY`, and
    (recommended) `GUILD_ID`.
 3. Run:
