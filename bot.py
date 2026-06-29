@@ -1,13 +1,18 @@
 """Nordic reseller Discord bot.
 
-Gives resellers self-serve tools against the NFA API:
-  /stock         - live stock snapshot (counts capped, default 5)
-  /stock-check   - register THIS server's Discord webhook for recurring stock updates
-  /stock-stop    - stop the recurring updates
-  /check <key>   - re-validate an activated key
-  /replace <key> - replace an invalid key within the 3-hour warranty
-  /delete <key>  - delete an unactivated key
-  /buy           - placeholder (balance + checkout arrive with the website)
+Self-serve tools for resellers against the NFA API, plus per-server stock
+update webhooks the bot manages for you.
+
+  /stock              - live stock snapshot (capped)
+  /stock-url          - bot creates a webhook in THIS channel and starts updates
+  /stock-paste <url>  - register an existing Discord webhook instead
+  /webhook-settings    - choose which games show, the cap, hide out-of-stock,
+                        and how often updates send
+  /stock-stop         - stop updates and delete the managed webhook
+  /check <key>        - re-validate an activated key
+  /replace <key>      - replace an invalid key within the 3-hour warranty
+  /delete <key>       - delete an unactivated key
+  /buy                - placeholder (balance + checkout arrive with the website)
 """
 import logging
 import re
@@ -42,6 +47,9 @@ GAME_GROUPS = [
     ("escape_from_tarkov", "Escape from Tarkov"),
     ("eft", "Escape from Tarkov"),
 ]
+ALL_GAMES = ["CS2", "Rust", "Arc Raiders", "Battlefield 6", "DayZ", "Escape from Tarkov"]
+INTERVAL_CHOICES = [5, 15, 30, 60, 120, 360, 720]
+CAP_CHOICES = [("No cap", 0), ("3", 3), ("5", 5), ("10", 10), ("25", 25)]
 
 _LABEL_FIXES = {
     "cs2": "", "rust": "", "arc": "", "dayz": "", "eft": "",
@@ -53,6 +61,7 @@ _LABEL_FIXES = {
 }
 
 
+# --------------------------- formatting helpers ---------------------------
 def display_count(count, cap):
     try:
         count = int(count)
@@ -72,9 +81,8 @@ def group_for(key):
 
 def prettify(key):
     """Turn a raw NFA key like 'rust_3000_7000_hours' into 'Rust 3000-7000 h'."""
-    parts = key.split("_")
     out = []
-    for p in parts:
+    for p in key.split("_"):
         if p in _LABEL_FIXES:
             mapped = _LABEL_FIXES[p]
             if mapped:
@@ -84,18 +92,33 @@ def prettify(key):
         else:
             out.append(p.capitalize())
     label = " ".join(out).strip()
-    # "3000 7000 h" -> "3000-7000 h"
     label = re.sub(r"(\d+)\s+(\d+)", r"\1-\2", label)
     return label or key
 
 
-def build_stock_embed(stock, cap):
+def parse_games(raw):
+    """Stored csv -> list of game names, or None (= all)."""
+    if not raw:
+        return None
+    games = [g.strip() for g in raw.split(",") if g.strip()]
+    return games or None
+
+
+def build_stock_embed(stock, *, cap, games=None, show_zero=True, title=None):
+    include = set(games) if games else None
     grouped = {}
     for key, value in sorted(stock.items()):
+        gname = group_for(key)
+        if include is not None and gname not in include:
+            continue
         n = display_count(value, cap)
-        grouped.setdefault(group_for(key), []).append((prettify(key), n))
+        if not show_zero and n == 0:
+            continue
+        grouped.setdefault(gname, []).append((prettify(key), n))
 
-    embed = discord.Embed(title=config.STOCK_EMBED_TITLE, color=config.EMBED_COLOR)
+    embed = discord.Embed(
+        title=title or config.STOCK_EMBED_TITLE, color=config.EMBED_COLOR
+    )
     order = [name for _, name in GAME_GROUPS] + ["Other"]
     seen = set()
     for name in order:
@@ -104,9 +127,28 @@ def build_stock_embed(stock, cap):
         seen.add(name)
         lines = [f"{label}: **{n}**" for label, n in grouped[name]]
         embed.add_field(name=name, value="\n".join(lines)[:1024], inline=False)
+    if not embed.fields:
+        embed.description = "No products to show with the current settings."
     embed.set_footer(text="Live stock \u00b7 nordicnfas.com")
     embed.timestamp = discord.utils.utcnow()
     return embed
+
+
+def embed_for_sub(stock, sub):
+    """Build the embed using a subscription row's saved settings."""
+    cap = sub["cap"] if sub["cap"] is not None else config.STOCK_CAP
+    return build_stock_embed(
+        stock,
+        cap=cap,
+        games=parse_games(sub["games"]),
+        show_zero=bool(sub["show_zero"]),
+        title=sub["title"],
+    )
+
+
+def sub_interval(sub):
+    val = sub["interval_minutes"]
+    return val if val and val > 0 else config.STOCK_UPDATE_MINUTES
 
 
 # --------------------------- bot ---------------------------
@@ -127,7 +169,7 @@ class ResellerBot(commands.Bot):
         else:
             await self.tree.sync()
             log.info("Slash commands synced globally (up to ~1h first time)")
-        self.stock_update_loop.start()
+        self.stock_tick.start()
 
     async def close(self):
         if self.session is not None:
@@ -136,42 +178,21 @@ class ResellerBot(commands.Bot):
         await super().close()
 
     # ----- NFA API helpers -----
-    async def nfa_get(self, path, params=None):
+    async def _nfa(self, method, path, *, params=None, json=None, timeout=30):
         url = f"{config.NFA_API_BASE}{path}"
         headers = {"X-API-Key": config.NFA_API_KEY}
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with self.session.get(
-            url, params=params, headers=headers, timeout=timeout
-        ) as resp:
-            return resp.status, await resp.json(content_type=None)
-
-    async def nfa_post(self, path, payload, timeout=30):
-        url = f"{config.NFA_API_BASE}{path}"
-        headers = {"X-API-Key": config.NFA_API_KEY}
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with self.session.post(
-            url, json=payload, headers=headers, timeout=client_timeout
-        ) as resp:
-            return resp.status, await resp.json(content_type=None)
-
-    async def nfa_delete(self, path, payload, timeout=30):
-        url = f"{config.NFA_API_BASE}{path}"
-        headers = {"X-API-Key": config.NFA_API_KEY}
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with self.session.delete(
-            url, json=payload, headers=headers, timeout=client_timeout
+        ct = aiohttp.ClientTimeout(total=timeout)
+        async with self.session.request(
+            method, url, params=params, json=json, headers=headers, timeout=ct
         ) as resp:
             return resp.status, await resp.json(content_type=None)
 
     async def fetch_stock(self):
-        _, data = await self.nfa_get("/api/v1/stock")
+        _, data = await self._nfa("GET", "/api/v1/stock", timeout=20)
         return data.get("stock", {}) if isinstance(data, dict) else {}
 
     async def post_to_webhook(self, url, embed):
-        payload = {
-            "embeds": [embed.to_dict()],
-            "username": config.WEBHOOK_USERNAME,
-        }
+        payload = {"embeds": [embed.to_dict()], "username": config.WEBHOOK_USERNAME}
         if config.WEBHOOK_AVATAR_URL:
             payload["avatar_url"] = config.WEBHOOK_AVATAR_URL
         async with self.session.post(url, json=payload) as resp:
@@ -179,133 +200,344 @@ class ResellerBot(commands.Bot):
                 text = await resp.text()
                 raise RuntimeError(f"webhook {resp.status}: {text[:200]}")
 
-    # ----- recurring stock updates -----
-    @tasks.loop(minutes=config.STOCK_UPDATE_MINUTES)
-    async def stock_update_loop(self):
+    # ----- recurring stock updates (per-guild interval) -----
+    @tasks.loop(seconds=60)
+    async def stock_tick(self):
+        import time
+
         subs = await self.db.all_subscriptions()
         if not subs:
+            return
+        due = [s for s in subs if time.time() - (s["last_sent_at"] or 0) >= sub_interval(s) * 60]
+        if not due:
             return
         try:
             stock = await self.fetch_stock()
         except Exception as exc:  # noqa: BLE001
             log.warning("stock fetch failed: %s", exc)
             return
-        embed = build_stock_embed(stock, config.STOCK_CAP)
-        for row in subs:
+        for sub in due:
             try:
-                await self.post_to_webhook(row["webhook_url"], embed)
+                await self.post_to_webhook(sub["webhook_url"], embed_for_sub(stock, sub))
+                await self.db.mark_sent(sub["guild_id"])
             except Exception as exc:  # noqa: BLE001
-                log.warning("post to guild %s failed: %s", row["guild_id"], exc)
+                log.warning("post to guild %s failed: %s", sub["guild_id"], exc)
+                # Avoid hammering a dead webhook every tick.
+                await self.db.mark_sent(sub["guild_id"])
 
-    @stock_update_loop.before_loop
-    async def _before_loop(self):
+    @stock_tick.before_loop
+    async def _before(self):
         await self.wait_until_ready()
 
 
 bot = ResellerBot()
 
 
-def _need_api_key(interaction):
+def _no_key():
     return not config.NFA_API_KEY
+
+
+# --------------------------- settings UI ---------------------------
+class SettingsView(discord.ui.View):
+    def __init__(self, owner_id, sub):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        games = parse_games(sub["games"]) or ALL_GAMES
+        cap = sub["cap"] if sub["cap"] is not None else config.STOCK_CAP
+        interval = sub_interval(sub)
+        show_zero = bool(sub["show_zero"])
+
+        self.games_select = discord.ui.Select(
+            placeholder="Games to show",
+            min_values=1,
+            max_values=len(ALL_GAMES),
+            options=[
+                discord.SelectOption(label=g, value=g, default=(g in games))
+                for g in ALL_GAMES
+            ],
+        )
+        self.games_select.callback = self._on_games
+        self.add_item(self.games_select)
+
+        self.interval_select = discord.ui.Select(
+            placeholder="How often updates send",
+            options=[
+                discord.SelectOption(
+                    label=(f"{m} min" if m < 60 else f"{m // 60} h"),
+                    value=str(m),
+                    default=(m == interval),
+                )
+                for m in INTERVAL_CHOICES
+            ],
+        )
+        self.interval_select.callback = self._on_interval
+        self.add_item(self.interval_select)
+
+        self.cap_select = discord.ui.Select(
+            placeholder="Max count shown (cap)",
+            options=[
+                discord.SelectOption(
+                    label=lbl, value=str(val), default=(val == cap)
+                )
+                for lbl, val in CAP_CHOICES
+            ],
+        )
+        self.cap_select.callback = self._on_cap
+        self.add_item(self.cap_select)
+
+        self.zero_button = discord.ui.Button(
+            label=("Out-of-stock: shown" if show_zero else "Out-of-stock: hidden"),
+            style=(discord.ButtonStyle.secondary if show_zero else discord.ButtonStyle.primary),
+        )
+        self.zero_button.callback = self._on_zero
+        self.add_item(self.zero_button)
+
+        self.test_button = discord.ui.Button(
+            label="Send update now", style=discord.ButtonStyle.success
+        )
+        self.test_button.callback = self._on_test
+        self.add_item(self.test_button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "These controls aren't yours.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _refresh(self, interaction, note):
+        sub = await bot.db.get_subscription(interaction.guild_id)
+        await interaction.response.edit_message(embed=settings_embed(sub, note), view=self)
+
+    async def _on_games(self, interaction):
+        await bot.db.update_settings(
+            interaction.guild_id, games=",".join(self.games_select.values)
+        )
+        for opt in self.games_select.options:
+            opt.default = opt.value in self.games_select.values
+        await self._refresh(interaction, "Updated which games show.")
+
+    async def _on_interval(self, interaction):
+        minutes = int(self.interval_select.values[0])
+        await bot.db.update_settings(interaction.guild_id, interval_minutes=minutes)
+        for opt in self.interval_select.options:
+            opt.default = opt.value == self.interval_select.values[0]
+        await self._refresh(interaction, "Updated how often updates send.")
+
+    async def _on_cap(self, interaction):
+        cap = int(self.cap_select.values[0])
+        await bot.db.update_settings(interaction.guild_id, cap=cap)
+        for opt in self.cap_select.options:
+            opt.default = opt.value == self.cap_select.values[0]
+        await self._refresh(interaction, "Updated the display cap.")
+
+    async def _on_zero(self, interaction):
+        sub = await bot.db.get_subscription(interaction.guild_id)
+        new_val = 0 if bool(sub["show_zero"]) else 1
+        await bot.db.update_settings(interaction.guild_id, show_zero=new_val)
+        self.zero_button.label = (
+            "Out-of-stock: shown" if new_val else "Out-of-stock: hidden"
+        )
+        self.zero_button.style = (
+            discord.ButtonStyle.secondary if new_val else discord.ButtonStyle.primary
+        )
+        await self._refresh(
+            interaction,
+            "Out-of-stock rows will now be shown." if new_val else "Out-of-stock rows are now hidden.",
+        )
+
+    async def _on_test(self, interaction):
+        await interaction.response.defer()
+        sub = await bot.db.get_subscription(interaction.guild_id)
+        try:
+            stock = await bot.fetch_stock()
+            await bot.post_to_webhook(sub["webhook_url"], embed_for_sub(stock, sub))
+            await bot.db.mark_sent(interaction.guild_id)
+            note = "Sent a stock update to your channel."
+        except Exception as exc:  # noqa: BLE001
+            note = f"Couldn't send: {exc}"
+        sub = await bot.db.get_subscription(interaction.guild_id)
+        await interaction.edit_original_response(embed=settings_embed(sub, note), view=self)
+
+
+def settings_embed(sub, note=None):
+    games = parse_games(sub["games"])
+    cap = sub["cap"] if sub["cap"] is not None else config.STOCK_CAP
+    embed = discord.Embed(title="Stock webhook settings", color=config.EMBED_COLOR)
+    embed.add_field(name="Games", value=", ".join(games) if games else "All", inline=False)
+    embed.add_field(name="Sends every", value=f"{sub_interval(sub)} min", inline=True)
+    embed.add_field(name="Cap", value=("No cap" if not cap else str(cap)), inline=True)
+    embed.add_field(
+        name="Out-of-stock", value=("Shown" if bool(sub["show_zero"]) else "Hidden"), inline=True
+    )
+    if note:
+        embed.description = note
+    return embed
 
 
 # --------------------------- commands ---------------------------
 @bot.tree.command(name="stock", description="Show live account stock (capped)")
 @app_commands.guild_only()
 async def stock(interaction: discord.Interaction):
-    if _need_api_key(interaction):
+    if _no_key():
         await interaction.response.send_message(
-            "Stock isn't configured yet (an admin must set `NFA_API_KEY`).",
-            ephemeral=True,
+            "Stock isn't configured yet (an admin must set `NFA_API_KEY`).", ephemeral=True
         )
         return
     await interaction.response.defer(thinking=True)
     try:
         data = await bot.fetch_stock()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("/stock fetch failed: %s", exc)
-        await interaction.followup.send(
-            "Couldn't fetch stock right now \u2014 please try again shortly."
-        )
+    except Exception:  # noqa: BLE001
+        await interaction.followup.send("Couldn't fetch stock right now \u2014 try again shortly.")
         return
-    await interaction.followup.send(embed=build_stock_embed(data, config.STOCK_CAP))
+    await interaction.followup.send(
+        embed=build_stock_embed(data, cap=config.STOCK_CAP)
+    )
 
 
 @bot.tree.command(
-    name="stock-check",
-    description="Register this server's webhook to receive recurring stock updates",
+    name="stock-url",
+    description="Create a webhook in THIS channel and start stock updates here",
 )
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    webhook_url="A Discord webhook URL from this server (Server Settings > Integrations > Webhooks)"
-)
-async def stock_check(interaction: discord.Interaction, webhook_url: str):
-    webhook_url = webhook_url.strip()
-    if not WEBHOOK_RE.match(webhook_url):
+async def stock_url(interaction: discord.Interaction):
+    if _no_key():
         await interaction.response.send_message(
-            "That doesn't look like a Discord webhook URL. Create one in "
-            "**Server Settings \u2192 Integrations \u2192 Webhooks**, copy its URL, "
-            "and run this again.",
+            "Not configured yet (an admin must set `NFA_API_KEY`).", ephemeral=True
+        )
+        return
+    channel = interaction.channel
+    me = interaction.guild.me
+    if not channel.permissions_for(me).manage_webhooks:
+        await interaction.response.send_message(
+            "I need the **Manage Webhooks** permission in this channel to create the "
+            "webhook. Give me that permission and run `/stock-url` again, or use "
+            "`/stock-paste` with a webhook URL you create yourself.",
             ephemeral=True,
         )
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
-
-    # Validate by sending the first stock update to the webhook.
     try:
+        existing = await bot.db.get_subscription(interaction.guild_id)
+        webhook = await channel.create_webhook(name=config.WEBHOOK_USERNAME)
+        await bot.db.set_subscription(interaction.guild_id, webhook.url, interaction.user.id)
         stock_data = await bot.fetch_stock()
-        embed = build_stock_embed(stock_data, config.STOCK_CAP)
-        await bot.post_to_webhook(webhook_url, embed)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("/stock-check validation failed: %s", exc)
+        sub = await bot.db.get_subscription(interaction.guild_id)
+        await bot.post_to_webhook(webhook.url, embed_for_sub(stock_data, sub))
+        await bot.db.mark_sent(interaction.guild_id)
+    except discord.Forbidden:
         await interaction.followup.send(
-            "Couldn't post to that webhook (is the URL correct and the channel "
-            "still there?). Nothing was saved.",
-            ephemeral=True,
+            "I couldn't create a webhook here (missing permission).", ephemeral=True
         )
         return
-
-    await bot.db.set_subscription(
-        interaction.guild_id, webhook_url, interaction.user.id
+    except Exception as exc:  # noqa: BLE001
+        await interaction.followup.send(f"Something went wrong: {exc}", ephemeral=True)
+        return
+    note = (
+        " (replaced the previous webhook for this server)"
+        if existing
+        else ""
     )
     await interaction.followup.send(
-        f"\u2705 Done! This server will now get stock updates every "
-        f"**{config.STOCK_UPDATE_MINUTES} min** (a first update was just posted). "
-        f"Use `/stock-stop` to turn it off.",
+        f"\u2705 Done! Stock updates will post in {channel.mention} every "
+        f"**{sub_interval(sub)} min**{note}. Use `/webhook-settings` to customise what "
+        f"shows and how often, or `/stock-stop` to turn it off.",
         ephemeral=True,
     )
 
 
 @bot.tree.command(
-    name="stock-stop", description="Stop recurring stock updates for this server"
+    name="stock-paste",
+    description="Register an existing Discord webhook URL for stock updates",
 )
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(manage_guild=True)
-async def stock_stop(interaction: discord.Interaction):
-    removed = await bot.db.remove_subscription(interaction.guild_id)
-    msg = (
-        "Recurring stock updates have been turned off for this server."
-        if removed
-        else "This server wasn't receiving stock updates."
+@app_commands.describe(webhook_url="A Discord webhook URL (Server Settings > Integrations > Webhooks)")
+async def stock_paste(interaction: discord.Interaction, webhook_url: str):
+    webhook_url = webhook_url.strip()
+    if not WEBHOOK_RE.match(webhook_url):
+        await interaction.response.send_message(
+            "That doesn't look like a Discord webhook URL.", ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await bot.db.set_subscription(interaction.guild_id, webhook_url, interaction.user.id)
+        stock_data = await bot.fetch_stock()
+        sub = await bot.db.get_subscription(interaction.guild_id)
+        await bot.post_to_webhook(webhook_url, embed_for_sub(stock_data, sub))
+        await bot.db.mark_sent(interaction.guild_id)
+    except Exception:  # noqa: BLE001
+        await bot.db.remove_subscription(interaction.guild_id)
+        await interaction.followup.send(
+            "Couldn't post to that webhook (is the URL correct?). Nothing was saved.",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(
+        f"\u2705 Registered. Updates send every **{sub_interval(sub)} min**. "
+        f"Use `/webhook-settings` to customise.",
+        ephemeral=True,
     )
-    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(
+    name="webhook-settings",
+    description="Customise what the stock updates show and how often they send",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+async def webhook_settings(interaction: discord.Interaction):
+    sub = await bot.db.get_subscription(interaction.guild_id)
+    if sub is None:
+        await interaction.response.send_message(
+            "This server isn't getting stock updates yet. Run `/stock-url` in the "
+            "channel you want them in first.",
+            ephemeral=True,
+        )
+        return
+    view = SettingsView(interaction.user.id, sub)
+    await interaction.response.send_message(
+        embed=settings_embed(sub), view=view, ephemeral=True
+    )
+
+
+@bot.tree.command(name="stock-stop", description="Stop stock updates for this server")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+async def stock_stop(interaction: discord.Interaction):
+    sub = await bot.db.get_subscription(interaction.guild_id)
+    if sub is None:
+        await interaction.response.send_message(
+            "This server wasn't receiving stock updates.", ephemeral=True
+        )
+        return
+    # Best-effort delete of a webhook we manage.
+    try:
+        wh = discord.Webhook.from_url(sub["webhook_url"], session=bot.session)
+        await wh.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    await bot.db.remove_subscription(interaction.guild_id)
+    await interaction.response.send_message(
+        "Stock updates turned off for this server.", ephemeral=True
+    )
 
 
 @bot.tree.command(name="check", description="Re-validate an activated account key")
 @app_commands.guild_only()
 @app_commands.describe(key="The activation key to check")
 async def check(interaction: discord.Interaction, key: str):
-    if _need_api_key(interaction):
+    if _no_key():
         await interaction.response.send_message(
             "Not configured yet (an admin must set `NFA_API_KEY`).", ephemeral=True
         )
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        _, data = await bot.nfa_post(
-            "/api/v1/check_account", {"activation_key": key.strip()}
-        )
+        _, data = await bot._nfa("POST", "/api/v1/check_account", json={"activation_key": key.strip()})
     except Exception as exc:  # noqa: BLE001
         await interaction.followup.send(f"Error: {exc}", ephemeral=True)
         return
@@ -320,32 +552,24 @@ async def check(interaction: discord.Interaction, key: str):
         await interaction.followup.send(body, ephemeral=True)
     else:
         msg = (data.get("message") if isinstance(data, dict) else None) or "invalid"
-        await interaction.followup.send(
-            f"\u274C Account is **invalid** ({msg}).", ephemeral=True
-        )
+        await interaction.followup.send(f"\u274C Account is **invalid** ({msg}).", ephemeral=True)
 
 
-@bot.tree.command(
-    name="replace",
-    description="Replace an invalid key within the 3-hour warranty",
-)
+@bot.tree.command(name="replace", description="Replace an invalid key within the 3-hour warranty")
 @app_commands.guild_only()
 @app_commands.describe(key="The activation key to replace")
 async def replace(interaction: discord.Interaction, key: str):
-    if _need_api_key(interaction):
+    if _no_key():
         await interaction.response.send_message(
             "Not configured yet (an admin must set `NFA_API_KEY`).", ephemeral=True
         )
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        _, data = await bot.nfa_post(
-            "/api/v1/check_account", {"activation_key": key.strip()}
-        )
-    except Exception as exc:  # noqa: BLE001
+        _, data = await bot._nfa("POST", "/api/v1/check_account", json={"activation_key": key.strip()})
+    except Exception:  # noqa: BLE001
         await interaction.followup.send(
-            "Couldn't reach the replacement service \u2014 try again shortly.",
-            ephemeral=True,
+            "Couldn't reach the replacement service \u2014 try again shortly.", ephemeral=True
         )
         return
     result = data.get("result") if isinstance(data, dict) else None
@@ -353,72 +577,52 @@ async def replace(interaction: discord.Interaction, key: str):
         rep = data.get("replacement_key")
         body = "\U0001F504 Replaced under the 3-hour warranty."
         if rep:
-            body += (
-                f"\n\n**New key:** ||`{rep}`||\n\n"
-                f"Activate it at {config.ACTIVATION_URL}"
-            )
+            body += f"\n\n**New key:** ||`{rep}`||\n\nActivate it at {config.ACTIVATION_URL}"
         await interaction.followup.send(body, ephemeral=True)
     elif result == "valid":
         await interaction.followup.send(
-            "\u2705 That account is still **valid** \u2014 no replacement needed.",
-            ephemeral=True,
+            "\u2705 That account is still **valid** \u2014 no replacement needed.", ephemeral=True
         )
     else:
-        msg = (data.get("message") if isinstance(data, dict) else None) or (
-            "outside the 3-hour warranty window"
-        )
-        await interaction.followup.send(
-            f"\u274C No replacement issued \u2014 {msg}.", ephemeral=True
-        )
+        msg = (data.get("message") if isinstance(data, dict) else None) or "outside the 3-hour warranty window"
+        await interaction.followup.send(f"\u274C No replacement issued \u2014 {msg}.", ephemeral=True)
 
 
-@bot.tree.command(
-    name="delete", description="Delete an unactivated key (removes it from stock)"
-)
+@bot.tree.command(name="delete", description="Delete an unactivated key (removes it from stock)")
 @app_commands.guild_only()
 @app_commands.describe(key="The unactivated activation key to delete")
 async def delete(interaction: discord.Interaction, key: str):
-    if _need_api_key(interaction):
+    if _no_key():
         await interaction.response.send_message(
             "Not configured yet (an admin must set `NFA_API_KEY`).", ephemeral=True
         )
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        status, data = await bot.nfa_delete(
-            "/api/v1/unactivated_keys", {"activation_key": key.strip()}
-        )
+        status, data = await bot._nfa("DELETE", "/api/v1/unactivated_keys", json={"activation_key": key.strip()})
     except Exception as exc:  # noqa: BLE001
         await interaction.followup.send(f"Error: {exc}", ephemeral=True)
         return
-    ok = status < 400 and (
-        not isinstance(data, dict) or data.get("status") != "error"
-    )
+    ok = status < 400 and (not isinstance(data, dict) or data.get("status") != "error")
     if ok:
         await interaction.followup.send("\U0001F5D1\uFE0F Key deleted.", ephemeral=True)
     else:
-        msg = (data.get("message") if isinstance(data, dict) else None) or (
-            "could not delete (only unactivated keys can be deleted)"
-        )
+        msg = (data.get("message") if isinstance(data, dict) else None) or "could not delete (only unactivated keys can be deleted)"
         await interaction.followup.send(f"\u274C {msg}.", ephemeral=True)
 
 
-@bot.tree.command(
-    name="buy", description="Purchase keys (coming soon \u2014 balance via the website)"
-)
+@bot.tree.command(name="buy", description="Purchase keys (coming soon \u2014 balance via the website)")
 @app_commands.guild_only()
 async def buy(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "\U0001F6D2 Purchasing isn't live yet. Balances and checkout are coming "
-        "with the reseller website \u2014 you'll be able to top up there and buy here.",
+        "\U0001F6D2 Purchasing isn't live yet. Balances and checkout are coming with the "
+        "reseller website \u2014 you'll be able to top up there and buy here.",
         ephemeral=True,
     )
 
 
 @bot.tree.error
-async def on_app_command_error(
-    interaction: discord.Interaction, error: app_commands.AppCommandError
-):
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         msg = "You need the **Manage Server** permission to do that."
     elif isinstance(error, app_commands.CheckFailure):
@@ -439,9 +643,7 @@ async def on_app_command_error(
 async def on_ready():
     log.info("Logged in as %s (%s)", bot.user, bot.user.id)
     try:
-        await bot.change_presence(
-            activity=discord.CustomActivity(name=config.BOT_STATUS_TEXT)
-        )
+        await bot.change_presence(activity=discord.CustomActivity(name=config.BOT_STATUS_TEXT))
     except Exception:  # noqa: BLE001
         pass
 

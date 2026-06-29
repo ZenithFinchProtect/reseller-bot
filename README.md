@@ -6,24 +6,30 @@ lets each reseller server subscribe its own channel to recurring stock updates.
 ## Commands
 
 - `/stock` - live stock snapshot (counts capped, default 5)
-- `/stock-check <webhook_url>` - register **this server's** Discord webhook to
-  receive recurring stock updates (requires **Manage Server**). Create a webhook
-  in *Server Settings → Integrations → Webhooks*, copy its URL, and pass it here.
-- `/stock-stop` - stop the recurring updates for this server
+- `/stock-url` - the bot **creates a webhook in the current channel** and starts
+  posting recurring stock updates there (requires **Manage Server**; the bot
+  needs **Manage Webhooks** in that channel). No copy-paste needed.
+- `/stock-paste <webhook_url>` - register an existing Discord webhook URL instead
+  (for channels where the bot can't create one).
+- `/webhook-settings` - interactive panel to customise the updates for this
+  server: which **games** show, the display **cap**, **show/hide out-of-stock**
+  rows, and **how often** updates send. Also has a "Send update now" button.
+- `/stock-stop` - stop updates and delete the managed webhook
 - `/check <key>` - re-validate an activated key
 - `/replace <key>` - replace an invalid key within the 3-hour warranty
 - `/delete <key>` - delete an unactivated key (removes it from stock)
 - `/buy` - placeholder; balances + checkout arrive with the reseller website
 
-Recurring stock updates are posted to every registered webhook every
-`STOCK_UPDATE_MINUTES` (default 30). Counts are capped at `STOCK_CAP` (default 5),
-matching the main-site embeds.
+Each server's updates use its own saved settings. Defaults come from
+`STOCK_UPDATE_MINUTES` (default 30) and `STOCK_CAP` (default 5, matching the
+main-site embeds) until changed via `/webhook-settings`. A background tick checks
+every minute and sends to each server on its own schedule.
 
 ## Setup
 
 1. Create a bot application at https://discord.com/developers/applications
    (Bot → Reset Token). Invite it with scopes `bot` + `applications.commands`
-   and permission `Send Messages`.
+   and permissions `Send Messages` + `Manage Webhooks` (needed for `/stock-url`).
 2. Copy `.env.example` to `.env` and fill in `DISCORD_TOKEN`, `NFA_API_KEY`, and
    (recommended) `GUILD_ID`.
 3. Run:
