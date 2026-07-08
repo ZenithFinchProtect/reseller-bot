@@ -12,7 +12,8 @@ update webhooks the bot manages for you.
   /check <key>        - re-validate an activated key
   /replace <key>      - replace an invalid key within the 3-hour warranty
   /delete <key>       - delete an unactivated key
-  /buy                - placeholder (balance + checkout arrive with the website)
+  /coin               - coins hub: balance, store, gambling, pay (buttons)
+  /coin-admin ...     - coin system administration
 """
 import logging
 import re
@@ -22,6 +23,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+import coins
 import config
 from db import Database
 
@@ -32,6 +34,8 @@ log = logging.getLogger("reseller-bot")
 
 intents = discord.Intents.default()
 intents.guilds = True
+intents.members = True      # privileged: Server Members Intent (coin tracking)
+intents.presences = True    # privileged: Presence Intent (coin tracking)
 
 WEBHOOK_RE = re.compile(
     r"^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+$"
@@ -162,6 +166,7 @@ class ResellerBot(commands.Bot):
     async def setup_hook(self):
         await self.db.connect()
         self.session = aiohttp.ClientSession()
+        await coins.setup(self)
         # Always keep the commands registered globally (so the bot can handle
         # interactions in any scope). If GUILD_ID is set, also register them to
         # that guild for instant availability.
@@ -584,16 +589,6 @@ async def delete(interaction: discord.Interaction, key: str):
     else:
         msg = (data.get("message") if isinstance(data, dict) else None) or "could not delete (only unactivated keys can be deleted)"
         await interaction.followup.send(f"\u274C {msg}.", ephemeral=True)
-
-
-@bot.tree.command(name="buy", description="Purchase keys (coming soon \u2014 balance via the website)")
-@app_commands.guild_only()
-async def buy(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "\U0001F6D2 Purchasing isn't live yet. Balances and checkout are coming with the "
-        "reseller website \u2014 you'll be able to top up there and buy here.",
-        ephemeral=True,
-    )
 
 
 @bot.tree.command(name="test", description="Health check: bot, NFA API, and this server's webhook")

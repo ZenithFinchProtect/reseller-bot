@@ -1,4 +1,4 @@
-"""Async SQLite storage for per-guild stock-webhook subscriptions + settings."""
+"""Async SQLite storage: stock-webhook subscriptions plus coin balances/settings."""
 import os
 import time
 
@@ -6,6 +6,23 @@ import aiosqlite
 
 # Columns a guild may tune via /webhook-settings.
 _SETTING_KEYS = {"interval_minutes", "cap", "games", "show_zero", "title"}
+
+# Only these coin-setting columns may be updated programmatically.
+_ALLOWED_COIN_SETTING_KEYS = {
+    "required_status",
+    "reward_seconds",
+    "coins_per_reward",
+    "log_channel_id",
+    "eligible_statuses",
+}
+
+# Only these user columns may be updated via upsert_user.
+_ALLOWED_USER_KEYS = {
+    "total_eligible_seconds",
+    "coins",
+    "rewards_count",
+    "updated_at",
+}
 
 
 class Database:
@@ -43,6 +60,31 @@ class Database:
                 show_zero        INTEGER DEFAULT 1,
                 title            TEXT,
                 last_sent_at     INTEGER DEFAULT 0
+            )
+            """
+        )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS coin_settings (
+                guild_id INTEGER PRIMARY KEY,
+                required_status TEXT,
+                reward_seconds REAL,
+                coins_per_reward INTEGER,
+                log_channel_id INTEGER,
+                eligible_statuses TEXT
+            )
+            """
+        )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                guild_id INTEGER,
+                user_id INTEGER,
+                total_eligible_seconds REAL DEFAULT 0,
+                coins INTEGER DEFAULT 0,
+                rewards_count INTEGER DEFAULT 0,
+                updated_at REAL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
             )
             """
         )
@@ -114,3 +156,110 @@ class Database:
             (int(when if when is not None else time.time()), guild_id),
         )
         await self._conn.commit()
+
+    # ----- coin settings -----
+    async def get_coin_settings(self, guild_id, defaults):
+        cur = await self._conn.execute(
+            "SELECT * FROM coin_settings WHERE guild_id = ?", (guild_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            await self._conn.execute(
+                """INSERT INTO coin_settings
+                   (guild_id, required_status, reward_seconds, coins_per_reward,
+                    log_channel_id, eligible_statuses)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    guild_id,
+                    defaults["required_status"],
+                    defaults["reward_seconds"],
+                    defaults["coins_per_reward"],
+                    defaults["log_channel_id"],
+                    defaults["eligible_statuses"],
+                ),
+            )
+            await self._conn.commit()
+            out = dict(defaults)
+            out["guild_id"] = guild_id
+            return out
+        return dict(row)
+
+    async def update_coin_setting(self, guild_id, key, value):
+        if key not in _ALLOWED_COIN_SETTING_KEYS:
+            raise ValueError(f"Illegal setting key: {key}")
+        await self._conn.execute(
+            f"UPDATE coin_settings SET {key} = ? WHERE guild_id = ?", (value, guild_id)
+        )
+        await self._conn.commit()
+
+    # ----- users / coins -----
+    async def get_user(self, guild_id, user_id):
+        cur = await self._conn.execute(
+            "SELECT * FROM users WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            now = time.time()
+            await self._conn.execute(
+                "INSERT INTO users (guild_id, user_id, updated_at) VALUES (?,?,?)",
+                (guild_id, user_id, now),
+            )
+            await self._conn.commit()
+            return {
+                "guild_id": guild_id,
+                "user_id": user_id,
+                "total_eligible_seconds": 0.0,
+                "coins": 0,
+                "rewards_count": 0,
+                "updated_at": now,
+            }
+        return dict(row)
+
+    async def upsert_user(self, guild_id, user_id, **fields):
+        for k in fields:
+            if k not in _ALLOWED_USER_KEYS:
+                raise ValueError(f"Illegal user key: {k}")
+        await self.get_user(guild_id, user_id)  # ensure row exists
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        vals = list(fields.values()) + [guild_id, user_id]
+        await self._conn.execute(
+            f"UPDATE users SET {cols} WHERE guild_id=? AND user_id=?", vals
+        )
+        await self._conn.commit()
+
+    async def add_coins(self, guild_id, user_id, amount):
+        u = await self.get_user(guild_id, user_id)
+        new = max(0, u["coins"] + amount)
+        await self.upsert_user(guild_id, user_id, coins=new)
+        return new
+
+    async def set_coins(self, guild_id, user_id, amount):
+        new = max(0, amount)
+        await self.upsert_user(guild_id, user_id, coins=new)
+        return new
+
+    async def try_adjust_coins(self, guild_id, user_id, delta):
+        """Atomically add `delta` coins, refusing to go below zero.
+
+        Returns (ok, balance). When the change would make the balance
+        negative, nothing is written and (False, current_balance) is
+        returned.
+        """
+        u = await self.get_user(guild_id, user_id)
+        current = u["coins"]
+        new = current + delta
+        if new < 0:
+            return False, current
+        await self.upsert_user(guild_id, user_id, coins=new)
+        return True, new
+
+    async def leaderboard(self, guild_id, limit=10):
+        cur = await self._conn.execute(
+            "SELECT user_id, coins FROM users WHERE guild_id=? "
+            "ORDER BY coins DESC, total_eligible_seconds DESC LIMIT ?",
+            (guild_id, limit),
+        )
+        return await cur.fetchall()
