@@ -26,6 +26,7 @@ from discord.ext import commands, tasks
 import coins
 import config
 from db import Database
+from relay import RelayServer
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
@@ -161,11 +162,14 @@ class ResellerBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.db = Database(config.DB_PATH)
         self.session = None
+        self.relay = None
         self._stock_cache = None
 
     async def setup_hook(self):
         await self.db.connect()
         self.session = aiohttp.ClientSession()
+        self.relay = RelayServer(self.session)
+        await self.relay.start()
         await coins.setup(self)
         # Always keep the commands registered globally (so the bot can handle
         # interactions in any scope). If GUILD_ID is set, also register them to
@@ -180,6 +184,8 @@ class ResellerBot(commands.Bot):
         self.stock_tick.start()
 
     async def close(self):
+        if self.relay is not None:
+            await self.relay.stop()
         if self.session is not None:
             await self.session.close()
         await self.db.close()
