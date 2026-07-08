@@ -157,6 +157,7 @@ class ResellerBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.db = Database(config.DB_PATH)
         self.session = None
+        self._stock_cache = None
 
     async def setup_hook(self):
         await self.db.connect()
@@ -190,8 +191,16 @@ class ResellerBot(commands.Bot):
             return resp.status, await resp.json(content_type=None)
 
     async def fetch_stock(self):
+        """Live stock map, cached 2 min to protect the NFA rate limit."""
+        import time
+
+        now = time.time()
+        if self._stock_cache and now - self._stock_cache[0] < 120:
+            return self._stock_cache[1]
         _, data = await self._nfa("GET", "/api/v1/stock", timeout=20)
-        return data.get("stock", {}) if isinstance(data, dict) else {}
+        stock = data.get("stock", {}) if isinstance(data, dict) else {}
+        self._stock_cache = (now, stock)
+        return stock
 
     async def post_to_webhook(self, url, embed):
         payload = {"embeds": [embed.to_dict()], "username": config.WEBHOOK_USERNAME}
@@ -381,6 +390,7 @@ def settings_embed(sub, note=None):
 # --------------------------- commands ---------------------------
 @bot.tree.command(name="stock", description="Show live account stock (capped)")
 @app_commands.guild_only()
+@app_commands.checks.cooldown(1, 120.0, key=lambda i: i.user.id)
 async def stock(interaction: discord.Interaction):
     if _no_key():
         await interaction.response.send_message(
@@ -490,6 +500,7 @@ async def stock_stop(interaction: discord.Interaction):
 
 @bot.tree.command(name="check", description="Re-validate an activated account key")
 @app_commands.guild_only()
+@app_commands.checks.cooldown(1, 120.0, key=lambda i: i.user.id)
 @app_commands.describe(key="The activation key to check")
 async def check(interaction: discord.Interaction, key: str):
     if _no_key():
@@ -519,6 +530,7 @@ async def check(interaction: discord.Interaction, key: str):
 
 @bot.tree.command(name="replace", description="Replace an invalid key within the 3-hour warranty")
 @app_commands.guild_only()
+@app_commands.checks.cooldown(1, 120.0, key=lambda i: i.user.id)
 @app_commands.describe(key="The activation key to replace")
 async def replace(interaction: discord.Interaction, key: str):
     if _no_key():
@@ -552,6 +564,7 @@ async def replace(interaction: discord.Interaction, key: str):
 
 @bot.tree.command(name="delete", description="Delete an unactivated key (removes it from stock)")
 @app_commands.guild_only()
+@app_commands.checks.cooldown(1, 120.0, key=lambda i: i.user.id)
 @app_commands.describe(key="The unactivated activation key to delete")
 async def delete(interaction: discord.Interaction, key: str):
     if _no_key():
@@ -618,7 +631,9 @@ async def test(interaction: discord.Interaction):
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"\u23F3 Slow down \u2014 try again in {error.retry_after:.0f}s."
+    elif isinstance(error, app_commands.MissingPermissions):
         msg = "You need the **Manage Server** permission to do that."
     elif isinstance(error, app_commands.CheckFailure):
         msg = "You can't use that command here."
