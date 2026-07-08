@@ -3,6 +3,7 @@
 Reads from environment / .env. Most values are defaults; the per-server stock
 webhook subscriptions live in the database (see db.py).
 """
+import json
 import os
 
 from dotenv import load_dotenv
@@ -61,3 +62,40 @@ DB_PATH = os.getenv("DB_PATH", "reseller_data.db")
 
 # The bot's own displayed status text.
 BOT_STATUS_TEXT = os.getenv("BOT_STATUS_TEXT", "nordicnfas.com")
+
+# --- Coins (status rewards + /coin hub) ---
+# Members earn coins for time spent online while displaying the required
+# custom-status text. Defaults are per-server tunable via /coin-admin.
+DEFAULT_REQUIRED_STATUS = os.getenv("REQUIRED_STATUS", "$1.20 Rust: nfaccount.com")
+DEFAULT_REWARD_HOURS = float(os.getenv("REWARD_HOURS", "48"))
+DEFAULT_COINS_PER_REWARD = _get_int("COINS_PER_REWARD", 1)
+DEFAULT_LOG_CHANNEL_ID = _get_int("LOG_CHANNEL_ID")
+DEFAULT_ELIGIBLE_STATUSES = os.getenv("ELIGIBLE_STATUSES", "online,dnd")
+COIN_NAME = os.getenv("COIN_NAME", "coin")
+COIN_EMOJI = os.getenv("COIN_EMOJI", "\U0001FA99")  # 🪙
+# How often (seconds) the bot credits online time and checks for rewards.
+TICK_SECONDS = _get_int("TICK_SECONDS", 60)
+
+# --- Gambling (mirrors the casino site's odds) ---
+GAMBLE_WIN_CHANCE = float(os.getenv("GAMBLE_WIN_CHANCE", "0.34"))
+GAMBLE_MULTIPLIER = float(os.getenv("GAMBLE_MULTIPLIER", "2"))
+GAMBLE_MAX_BET = _get_int("GAMBLE_MAX_BET", 5)
+
+# --- Store products (priced in coins) ---
+# Override with a STORE_TIERS env var (JSON list) if you want to change them.
+DEFAULT_STORE_TIERS = [
+    {"account_type": "rust_0_250_hours", "label": "Rust 0-250 hours (Base)", "cost": 1},
+    {"account_type": "rust_500_1000_hours", "label": "Rust 500-1000 hours", "cost": 3},
+    {"account_type": "rust_3000_7000_hours", "label": "Rust 3000-7000 hours", "cost": 4},
+    {"account_type": "arc_0_99_hours", "label": "Arc 0-99 hours", "cost": 1},
+    {"account_type": "arc_100_200_hours", "label": "Arc 100-200 hours", "cost": 3},
+    {"account_type": "arc_200_plus_hours", "label": "Arc 200+ hours", "cost": 5},
+    {"account_type": "cs2_prime", "label": "CS2 Prime", "cost": 1},
+    {"account_type": "cs2_premier", "label": "CS2 Premier", "cost": 1},
+    {"account_type": "cs2_10_15k_elo", "label": "CS2 10-15k ELO", "cost": 2},
+    {"account_type": "cs2_15_20k_elo", "label": "CS2 15-20k ELO", "cost": 3},
+]
+try:
+    STORE_TIERS = json.loads(os.getenv("STORE_TIERS", "")) or DEFAULT_STORE_TIERS
+except (ValueError, TypeError):
+    STORE_TIERS = DEFAULT_STORE_TIERS
