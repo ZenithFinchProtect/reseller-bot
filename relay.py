@@ -19,7 +19,6 @@ import config
 log = logging.getLogger("reseller-bot.relay")
 
 RELAY_SECRET = os.getenv("RELAY_SECRET", "").strip()
-RELAY_PORT = int(os.getenv("PORT", os.getenv("RELAY_PORT", "8080")))
 
 ALLOWED_PATHS = {
     "/api/v1/stock",
@@ -34,27 +33,21 @@ ALLOWED_PATHS = {
 
 
 class RelayServer:
+    """Relay route handlers, mounted on the bot's shared web server."""
+
     def __init__(self, session):
         self.session = session
-        self._runner = None
 
-    async def start(self):
+    @property
+    def enabled(self):
         if not RELAY_SECRET:
             log.info("RELAY_SECRET not set - NFA relay disabled")
-            return
-        app = web.Application()
+            return False
+        return True
+
+    def attach(self, app):
         app.router.add_get("/relay/health", self._health)
         app.router.add_route("*", "/relay/{tail:.*}", self._relay)
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, "0.0.0.0", RELAY_PORT)
-        await site.start()
-        log.info("NFA relay listening on port %s", RELAY_PORT)
-
-    async def stop(self):
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
 
     async def _health(self, request):
         return web.json_response({"status": "ok"})
