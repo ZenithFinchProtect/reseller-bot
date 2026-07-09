@@ -20,6 +20,7 @@ import re
 
 import aiohttp
 import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands, tasks
 
@@ -27,6 +28,7 @@ import coins
 import config
 from db import Database
 from relay import RelayServer
+from web_api import CoinApi
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
@@ -162,15 +164,14 @@ class ResellerBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.db = Database(config.DB_PATH)
         self.session = None
-        self.relay = None
+        self._web_runner = None
         self._stock_cache = None
 
     async def setup_hook(self):
         await self.db.connect()
         self.session = aiohttp.ClientSession()
-        self.relay = RelayServer(self.session)
-        await self.relay.start()
         await coins.setup(self)
+        await self._start_web_server()
         # Always keep the commands registered globally (so the bot can handle
         # interactions in any scope). If GUILD_ID is set, also register them to
         # that guild for instant availability.
@@ -183,9 +184,30 @@ class ResellerBot(commands.Bot):
             log.info("Synced %d command(s) to guild %s", len(gsynced), config.GUILD_ID)
         self.stock_tick.start()
 
+    async def _start_web_server(self):
+        """One aiohttp server hosting the NFA relay and the coin API."""
+        app = web.Application()
+        mounted = False
+        relay = RelayServer(self.session)
+        if relay.enabled:
+            relay.attach(app)
+            mounted = True
+        coin_api = CoinApi(self)
+        if coin_api.enabled:
+            coin_api.attach(app)
+            mounted = True
+        if not mounted:
+            return
+        self._web_runner = web.AppRunner(app)
+        await self._web_runner.setup()
+        site = web.TCPSite(self._web_runner, "0.0.0.0", config.WEB_PORT)
+        await site.start()
+        log.info("Web server listening on port %s", config.WEB_PORT)
+
     async def close(self):
-        if self.relay is not None:
-            await self.relay.stop()
+        if self._web_runner is not None:
+            await self._web_runner.cleanup()
+            self._web_runner = None
         if self.session is not None:
             await self.session.close()
         await self.db.close()

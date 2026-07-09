@@ -76,6 +76,14 @@ COIN_EMOJI = os.getenv("COIN_EMOJI", "\U0001FA99")  # 🪙
 # How often (seconds) the bot credits online time and checks for rewards.
 TICK_SECONDS = _get_int("TICK_SECONDS", 60)
 
+# --- Coin HTTP API (used by the shop bot and the casino site) ---
+# Shared key clients must send in X-API-Key; unset disables the API.
+CASINO_API_KEY = os.getenv("CASINO_API_KEY", "").strip()
+# Guild whose balances/settings the API exposes; defaults to GUILD_ID.
+CASINO_API_GUILD_ID = _get_int("CASINO_API_GUILD_ID", GUILD_ID)
+# Port the shared web server (relay + coin API) listens on.
+WEB_PORT = _get_int("PORT", _get_int("RELAY_PORT", 8080))
+
 # --- Gambling (mirrors the casino site's odds) ---
 GAMBLE_WIN_CHANCE = float(os.getenv("GAMBLE_WIN_CHANCE", "0.34"))
 GAMBLE_MULTIPLIER = float(os.getenv("GAMBLE_MULTIPLIER", "2"))
