@@ -73,6 +73,12 @@ def human_duration(seconds):
     return " ".join(parts)
 
 
+def fmt_coins(value):
+    """Format a (possibly fractional) coin amount, up to 3 decimals."""
+    s = f"{float(value):.3f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
 def extract_stock(stock, account_type):
     """Pull a numeric stock count for an account type from the /stock payload."""
     value = stock.get(account_type) if isinstance(stock, dict) else None
@@ -158,23 +164,36 @@ class CoinsCog(commands.Cog):
             self.eligible_since.pop(key, None)
 
     async def process_rewards(self, guild_id, user_id, settings):
-        """Grant coins for any newly-completed reward intervals. Returns gained."""
+        """Credit coins continuously for newly-accrued eligible time.
+
+        Coins accrue fractionally (e.g. 0.001 at a time) so balances tick up
+        toward coins_per_reward every reward interval. Returns the number of
+        whole coins completed since the last call (used for announcements).
+        """
         reward_seconds = settings["reward_seconds"]
         if reward_seconds <= 0:
             return 0
         u = await self.bot.db.get_user(guild_id, user_id)
-        target = int(u["total_eligible_seconds"] // reward_seconds)
-        if target > u["rewards_count"]:
-            diff = target - u["rewards_count"]
-            gained = diff * int(settings["coins_per_reward"])
-            await self.bot.db.upsert_user(
-                guild_id,
-                user_id,
-                coins=u["coins"] + gained,
-                rewards_count=target,
-            )
-            return gained
-        return 0
+        total = u["total_eligible_seconds"]
+        credited = u.get("credited_seconds") or 0.0
+        if credited <= 0 and u["rewards_count"] > 0:
+            # Pre-fractional rows were only paid for whole intervals.
+            credited = u["rewards_count"] * reward_seconds
+        delta = total - credited
+        if delta <= 0:
+            return 0
+        per = float(settings["coins_per_reward"])
+        gained = delta / reward_seconds * per
+        target = int(total // reward_seconds)
+        whole = max(0, target - u["rewards_count"]) * int(settings["coins_per_reward"])
+        await self.bot.db.upsert_user(
+            guild_id,
+            user_id,
+            coins=u["coins"] + gained,
+            credited_seconds=total,
+            rewards_count=max(target, u["rewards_count"]),
+        )
+        return whole
 
     async def announce_reward(self, guild, user_id, gained, settings):
         u = await self.bot.db.get_user(guild.id, user_id)
@@ -192,7 +211,7 @@ class CoinsCog(commands.Cog):
             description=(
                 f"{who} earned **{gained} {config.COIN_NAME}(s)** for staying "
                 f"online with the required status.\n"
-                f"New balance: **{u['coins']} {config.COIN_NAME}(s)**"
+                f"New balance: **{fmt_coins(u['coins'])} {config.COIN_NAME}(s)**"
             ),
             color=config.EMBED_COLOR,
         )
@@ -281,7 +300,7 @@ async def balance_embed(cog, guild_id, user):
         title=f"{config.COIN_EMOJI} {user.display_name}'s Balance",
         color=config.EMBED_COLOR,
     )
-    embed.add_field(name="Coins", value=f"**{u['coins']}** {config.COIN_NAME}(s)", inline=True)
+    embed.add_field(name="Coins", value=f"**{fmt_coins(u['coins'])}** {config.COIN_NAME}(s)", inline=True)
     embed.add_field(name="Rewards earned", value=str(u["rewards_count"]), inline=True)
     embed.add_field(name="Total online time", value=human_duration(total), inline=False)
     embed.add_field(
@@ -334,7 +353,7 @@ async def leaderboard_embed(bot, guild, limit=10):
         member = guild.get_member(row["user_id"])
         name = member.display_name if member else f"User {row['user_id']}"
         prefix = medals[i] if i < 3 else f"`#{i + 1}`"
-        lines.append(f"{prefix} **{name}** \u2014 {row['coins']} {config.COIN_NAME}(s)")
+        lines.append(f"{prefix} **{name}** \u2014 {fmt_coins(row['coins'])} {config.COIN_NAME}(s)")
     return discord.Embed(
         title=f"{config.COIN_EMOJI} Leaderboard",
         description="\n".join(lines) if lines else "No one has earned coins yet.",
@@ -418,7 +437,7 @@ async def do_purchase(cog, interaction, account_type):
     u = await bot.db.get_user(guild_id, uid)
     if u["coins"] < cost:
         await interaction.response.send_message(
-            f"You need **{cost}** {config.COIN_NAME}(s) but only have **{u['coins']}**.",
+            f"You need **{cost}** {config.COIN_NAME}(s) but only have **{fmt_coins(u['coins'])}**.",
             ephemeral=True,
         )
         return
@@ -568,7 +587,7 @@ async def do_gamble(cog, interaction, game, bet):
 
     embed = discord.Embed(
         title=f"{'Coin Flip' if game == 'coinflip' else 'Dice'} \u2014 bet {bet}",
-        description=f"{result}\n\nBalance: **{u['coins']}** {config.COIN_NAME}(s)",
+        description=f"{result}\n\nBalance: **{fmt_coins(u['coins'])}** {config.COIN_NAME}(s)",
         color=color,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -774,7 +793,7 @@ async def hub_embed(cog, interaction):
         title=f"{config.COIN_EMOJI} Coins",
         color=config.EMBED_COLOR,
         description=(
-            f"Your balance: **{u['coins']}** {config.COIN_NAME}(s)\n\n"
+            f"Your balance: **{fmt_coins(u['coins'])}** {config.COIN_NAME}(s)\n\n"
             f"Earn **{settings['coins_per_reward']} {config.COIN_NAME}(s)** per "
             f"**{hours:g}h** online with `{settings['required_status']}` in your status.\n"
             f"Spend them in the **Store**, try your luck with **Coinflip** / **Dice** "
@@ -806,7 +825,7 @@ class CoinAdminGroup(app_commands.Group):
     async def addcoins(self, interaction, user: discord.Member, amount: int):
         new = await self.cog.bot.db.add_coins(interaction.guild_id, user.id, amount)
         await interaction.response.send_message(
-            f"{user.display_name} now has **{new}** {config.COIN_NAME}(s).", ephemeral=True
+            f"{user.display_name} now has **{fmt_coins(new)}** {config.COIN_NAME}(s).", ephemeral=True
         )
 
     @app_commands.command(name="setcoins", description="Set a user's coin balance")
@@ -814,7 +833,7 @@ class CoinAdminGroup(app_commands.Group):
     async def setcoins(self, interaction, user: discord.Member, amount: int):
         new = await self.cog.bot.db.set_coins(interaction.guild_id, user.id, amount)
         await interaction.response.send_message(
-            f"{user.display_name} now has **{new}** {config.COIN_NAME}(s).", ephemeral=True
+            f"{user.display_name} now has **{fmt_coins(new)}** {config.COIN_NAME}(s).", ephemeral=True
         )
 
     @app_commands.command(name="setrequiredstatus", description="Set the required custom-status text")

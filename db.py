@@ -21,6 +21,7 @@ _ALLOWED_USER_KEYS = {
     "total_eligible_seconds",
     "coins",
     "rewards_count",
+    "credited_seconds",
     "updated_at",
 }
 
@@ -81,8 +82,9 @@ class Database:
                 guild_id INTEGER,
                 user_id INTEGER,
                 total_eligible_seconds REAL DEFAULT 0,
-                coins INTEGER DEFAULT 0,
+                coins REAL DEFAULT 0,
                 rewards_count INTEGER DEFAULT 0,
+                credited_seconds REAL DEFAULT 0,
                 updated_at REAL DEFAULT 0,
                 PRIMARY KEY (guild_id, user_id)
             )
@@ -106,6 +108,12 @@ class Database:
                 await self._conn.execute(
                     f"ALTER TABLE stock_subscriptions ADD COLUMN {name} {decl}"
                 )
+        cur = await self._conn.execute("PRAGMA table_info(users)")
+        ucols = {row["name"] for row in await cur.fetchall()}
+        if ucols and "credited_seconds" not in ucols:
+            await self._conn.execute(
+                "ALTER TABLE users ADD COLUMN credited_seconds REAL DEFAULT 0"
+            )
 
     # ----- subscriptions -----
     async def set_subscription(self, guild_id, webhook_url, added_by):
@@ -212,6 +220,7 @@ class Database:
                 "total_eligible_seconds": 0.0,
                 "coins": 0,
                 "rewards_count": 0,
+                "credited_seconds": 0.0,
                 "updated_at": now,
             }
         return dict(row)

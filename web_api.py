@@ -106,7 +106,7 @@ class CoinApi:
         if user_id is None:
             return web.json_response({"error": "invalid user_id"}, status=400)
         user = await self.bot.db.get_user(self.guild_id, user_id)
-        return web.json_response({"user_id": user_id, "coins": user["coins"]})
+        return web.json_response({"user_id": user_id, "coins": round(user["coins"], 3)})
 
     async def handle_leaderboard(self, request):
         if not _require_key(request):
@@ -118,7 +118,7 @@ class CoinApi:
         limit = max(1, min(limit, 50))
         rows = await self.bot.db.leaderboard(self.guild_id, limit)
         return web.json_response(
-            {"leaderboard": [{"user_id": row["user_id"], "coins": row["coins"]} for row in rows]}
+            {"leaderboard": [{"user_id": row["user_id"], "coins": round(row["coins"], 3)} for row in rows]}
         )
 
     async def handle_profile(self, request):
@@ -140,7 +140,7 @@ class CoinApi:
         return web.json_response(
             {
                 "user_id": user_id,
-                "coins": u["coins"],
+                "coins": round(u["coins"], 3),
                 "rewards_count": u["rewards_count"],
                 "total_seconds": total,
                 "remaining_seconds": remaining,
@@ -256,7 +256,7 @@ class CoinApi:
             return web.json_response({"error": "cannot pay yourself"}, status=400)
         ok, sender_balance = await self.bot.db.try_adjust_coins(self.guild_id, from_id, -amount)
         if not ok:
-            return web.json_response({"error": "insufficient_balance", "coins": sender_balance}, status=409)
+            return web.json_response({"error": "insufficient_balance", "coins": round(sender_balance, 3)}, status=409)
         recipient_balance = await self.bot.db.add_coins(self.guild_id, to_id, amount)
         return web.json_response(
             {
@@ -264,8 +264,8 @@ class CoinApi:
                 "from_id": from_id,
                 "to_id": to_id,
                 "amount": amount,
-                "from_coins": sender_balance,
-                "to_coins": recipient_balance,
+                "from_coins": round(sender_balance, 3),
+                "to_coins": round(recipient_balance, 3),
             }
         )
 
@@ -283,7 +283,7 @@ class CoinApi:
         if not isinstance(amount, int) or isinstance(amount, bool):
             return web.json_response({"error": "amount must be an integer"}, status=400)
         new = await self.bot.db.set_coins(self.guild_id, user_id, amount)
-        return web.json_response({"user_id": user_id, "coins": new})
+        return web.json_response({"user_id": user_id, "coins": round(new, 3)})
 
     async def handle_adjust(self, request):
         if not _require_key(request):
@@ -300,5 +300,5 @@ class CoinApi:
             return web.json_response({"error": "delta must be an integer"}, status=400)
         ok, balance = await self.bot.db.try_adjust_coins(self.guild_id, user_id, delta)
         if not ok:
-            return web.json_response({"error": "insufficient_balance", "coins": balance}, status=409)
-        return web.json_response({"user_id": user_id, "coins": balance, "applied": delta})
+            return web.json_response({"error": "insufficient_balance", "coins": round(balance, 3)}, status=409)
+        return web.json_response({"user_id": user_id, "coins": round(balance, 3), "applied": delta})
