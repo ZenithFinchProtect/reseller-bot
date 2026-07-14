@@ -10,6 +10,7 @@ Endpoints (all scoped to the configured guild):
   GET  /api/coins/profile?user_id=   -> balance + reward progress
   GET  /api/coins/check?user_id=     -> live earning-eligibility breakdown
   GET  /api/coins/settings           -> guild reward settings
+  GET  /api/coins/store              -> store tiers priced in coins
   POST /api/coins/settings           -> update one setting {"key", "value"}
   POST /api/coins/pay                -> {"from_id", "to_id", "amount"}
   POST /api/coins/set                -> {"user_id", "amount"}
@@ -88,6 +89,7 @@ class CoinApi:
                 web.get("/api/coins/profile", self.handle_profile),
                 web.get("/api/coins/check", self.handle_check),
                 web.get("/api/coins/settings", self.handle_get_settings),
+                web.get("/api/coins/store", self.handle_store),
                 web.post("/api/coins/settings", self.handle_update_setting),
                 web.post("/api/coins/pay", self.handle_pay),
                 web.post("/api/coins/set", self.handle_set),
@@ -191,6 +193,24 @@ class CoinApi:
                 "reward_hours": s["reward_seconds"] / 3600.0,
                 "coins_per_reward": s["coins_per_reward"],
                 "eligible_statuses": s["eligible_statuses"],
+                "coin_name": config.COIN_NAME,
+                "coin_emoji": config.COIN_EMOJI,
+            }
+        )
+
+    async def handle_store(self, request):
+        if not _require_key(request):
+            return _unauthorized()
+        return web.json_response(
+            {
+                "tiers": [
+                    {
+                        "account_type": t["account_type"],
+                        "label": t.get("label", t["account_type"]),
+                        "cost": int(t.get("cost", 0)),
+                    }
+                    for t in config.STORE_TIERS
+                ],
                 "coin_name": config.COIN_NAME,
                 "coin_emoji": config.COIN_EMOJI,
             }
