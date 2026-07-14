@@ -236,15 +236,18 @@ class CoinsCog(commands.Cog):
     # ----- background loop -----
     @tasks.loop(seconds=config.TICK_SECONDS)
     async def reward_loop(self):
-        now = time.time()
-        for guild in self.bot.guilds:
-            settings = await self.get_guild_settings(guild.id)
-            keys = [k for k in list(self.eligible_since.keys()) if k[0] == guild.id]
-            for (gid, uid) in keys:
-                await self.flush_user(gid, uid, now)
-                gained = await self.process_rewards(gid, uid, settings)
-                if gained > 0:
-                    await self.announce_reward(guild, uid, gained, settings)
+        try:
+            now = time.time()
+            for guild in self.bot.guilds:
+                settings = await self.get_guild_settings(guild.id)
+                keys = [k for k in list(self.eligible_since.keys()) if k[0] == guild.id]
+                for (gid, uid) in keys:
+                    await self.flush_user(gid, uid, now)
+                    gained = await self.process_rewards(gid, uid, settings)
+                    if gained > 0:
+                        await self.announce_reward(guild, uid, gained, settings)
+        except Exception:  # noqa: BLE001 - the loop must never die
+            log.exception("reward_loop tick failed; will retry next tick")
 
     @reward_loop.before_loop
     async def _before_loop(self):
