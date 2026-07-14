@@ -173,7 +173,7 @@ class Database:
         row = await cur.fetchone()
         if row is None:
             await self._conn.execute(
-                """INSERT INTO coin_settings
+                """INSERT OR IGNORE INTO coin_settings
                    (guild_id, required_status, reward_seconds, coins_per_reward,
                     log_channel_id, eligible_statuses)
                    VALUES (?,?,?,?,?,?)""",

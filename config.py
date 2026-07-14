@@ -58,7 +58,11 @@ WEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "Nordic Stock")
 WEBHOOK_AVATAR_URL = os.getenv("WEBHOOK_AVATAR_URL", "").strip()
 
 # --- Internals ---
-DB_PATH = os.getenv("DB_PATH", "reseller_data.db")
+# Store the SQLite DB on the Railway volume when one is mounted so coin
+# balances survive restarts and redeploys.
+_VOLUME = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+_DEFAULT_DB = os.path.join(_VOLUME, "reseller_data.db") if _VOLUME else "reseller_data.db"
+DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 # The bot's own displayed status text.
 BOT_STATUS_TEXT = os.getenv("BOT_STATUS_TEXT", "nordicnfas.com")
