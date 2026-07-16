@@ -93,6 +93,30 @@ GAMBLE_WIN_CHANCE = float(os.getenv("GAMBLE_WIN_CHANCE", "0.34"))
 GAMBLE_MULTIPLIER = float(os.getenv("GAMBLE_MULTIPLIER", "2"))
 GAMBLE_MAX_BET = _get_int("GAMBLE_MAX_BET", 5)
 
+# --- Crypto top-ups (hot wallet) ---
+# BIP39 seed of the receiving hot wallet. Leave unset to disable top-ups;
+# the bot logs a freshly generated mnemonic on boot so you can copy it into
+# the environment (never commit it anywhere).
+HOT_WALLET_MNEMONIC = os.getenv("HOT_WALLET_MNEMONIC", "").strip()
+# Minutes a top-up invoice stays valid.
+TOPUP_EXPIRE_MINUTES = _get_int("TOPUP_EXPIRE_MINUTES", 60)
+# Seconds between blockchain checks for pending invoices.
+TOPUP_POLL_SECONDS = _get_int("TOPUP_POLL_SECONDS", 60)
+# Seconds between auto-withdraw balance checks.
+AUTO_WITHDRAW_POLL_SECONDS = _get_int("AUTO_WITHDRAW_POLL_SECONDS", 600)
+# Packages members can buy: coins granted per USD price.
+DEFAULT_TOPUP_PACKAGES = [
+    {"coins": 1, "usd": 2.0},
+    {"coins": 3, "usd": 5.0},
+    {"coins": 7, "usd": 10.0},
+    {"coins": 15, "usd": 20.0},
+    {"coins": 40, "usd": 50.0},
+]
+try:
+    TOPUP_PACKAGES = json.loads(os.getenv("TOPUP_PACKAGES", "")) or DEFAULT_TOPUP_PACKAGES
+except (ValueError, TypeError):
+    TOPUP_PACKAGES = DEFAULT_TOPUP_PACKAGES
+
 # --- Store products (priced in coins) ---
 # Override with a STORE_TIERS env var (JSON list) if you want to change them.
 DEFAULT_STORE_TIERS = [

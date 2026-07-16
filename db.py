@@ -91,6 +91,33 @@ class Database:
             """
         )
 
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                coins INTEGER NOT NULL,
+                usd REAL NOT NULL,
+                currency TEXT NOT NULL,
+                amount_units INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                txid TEXT,
+                created_at INTEGER NOT NULL,
+                paid_at INTEGER
+            )
+            """
+        )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_settings (
+                currency TEXT PRIMARY KEY,
+                payout_address TEXT,
+                auto_threshold_usd REAL DEFAULT 0
+            )
+            """
+        )
+
     async def _migrate(self):
         """Add any columns missing from older databases."""
         cur = await self._conn.execute("PRAGMA table_info(stock_subscriptions)")
@@ -264,6 +291,81 @@ class Database:
             return False, current
         await self.upsert_user(guild_id, user_id, coins=new)
         return True, new
+
+    # ----- crypto top-ups -----
+    async def create_topup(self, guild_id, user_id, coins, usd, currency, amount_units):
+        cur = await self._conn.execute(
+            "INSERT INTO topups (guild_id, user_id, coins, usd, currency, amount_units, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (guild_id, user_id, coins, usd, currency, amount_units, int(time.time())),
+        )
+        await self._conn.commit()
+        return cur.lastrowid
+
+    async def pending_topups(self, currency=None):
+        q = "SELECT * FROM topups WHERE status='pending'"
+        args = ()
+        if currency:
+            q += " AND currency=?"
+            args = (currency,)
+        cur = await self._conn.execute(q, args)
+        return await cur.fetchall()
+
+    async def pending_amount_exists(self, currency, amount_units):
+        cur = await self._conn.execute(
+            "SELECT 1 FROM topups WHERE status='pending' AND currency=? AND amount_units=?",
+            (currency, amount_units),
+        )
+        return await cur.fetchone() is not None
+
+    async def mark_topup(self, topup_id, status, txid=None):
+        cur = await self._conn.execute(
+            "UPDATE topups SET status=?, txid=?, paid_at=? WHERE id=? AND status='pending'",
+            (status, txid, int(time.time()) if status == 'paid' else None, topup_id),
+        )
+        await self._conn.commit()
+        return cur.rowcount > 0
+
+    async def txid_already_used(self, currency, txid):
+        cur = await self._conn.execute(
+            "SELECT 1 FROM topups WHERE currency=? AND txid=?", (currency, txid)
+        )
+        return await cur.fetchone() is not None
+
+    async def topup_revenue(self):
+        cur = await self._conn.execute(
+            "SELECT currency, COUNT(*) AS n, SUM(usd) AS usd, SUM(amount_units) AS units "
+            "FROM topups WHERE status='paid' GROUP BY currency"
+        )
+        return await cur.fetchall()
+
+    async def recent_topups(self, limit=10):
+        cur = await self._conn.execute(
+            "SELECT * FROM topups WHERE status='paid' ORDER BY paid_at DESC LIMIT ?",
+            (limit,),
+        )
+        return await cur.fetchall()
+
+    # ----- wallet settings (payout addresses / auto-withdraw) -----
+    async def get_wallet_settings(self):
+        cur = await self._conn.execute("SELECT * FROM wallet_settings")
+        return {row["currency"]: dict(row) for row in await cur.fetchall()}
+
+    async def set_payout_address(self, currency, address):
+        await self._conn.execute(
+            "INSERT INTO wallet_settings (currency, payout_address) VALUES (?,?) "
+            "ON CONFLICT(currency) DO UPDATE SET payout_address=excluded.payout_address",
+            (currency, address),
+        )
+        await self._conn.commit()
+
+    async def set_auto_threshold(self, currency, usd):
+        await self._conn.execute(
+            "INSERT INTO wallet_settings (currency, auto_threshold_usd) VALUES (?,?) "
+            "ON CONFLICT(currency) DO UPDATE SET auto_threshold_usd=excluded.auto_threshold_usd",
+            (currency, usd),
+        )
+        await self._conn.commit()
 
     async def leaderboard(self, guild_id, limit=10):
         cur = await self._conn.execute(

@@ -49,6 +49,28 @@ Uses the included `Dockerfile` / `railway.json`. Set the environment variables
 bake secrets into the image. SQLite (`reseller_data.db`) stores the per-server
 webhook subscriptions; mount a volume if you want them to survive redeploys.
 
+## Crypto top-ups (hot wallet)
+
+Members can buy coins with **BTC / ETH / SOL / LTC** from the `/coin` hub's
+**Top Up** button. Payments go straight to a hot wallet the bot controls:
+
+1. Start the bot once without `HOT_WALLET_MNEMONIC` set — it logs a freshly
+   generated 12-word seed. Save it somewhere safe (it *is* the money) and set
+   it as the `HOT_WALLET_MNEMONIC` env var, then restart.
+2. Each top-up invoice shows the deposit address plus a unique exact amount;
+   the bot watches free public explorers (mempool.space, litecoinspace.org,
+   Blockscout, Solana RPC) and credits coins after 1 confirmation, then DMs
+   the buyer. Invoices expire after `TOPUP_EXPIRE_MINUTES` (default 60).
+3. Admins run `/coin-admin wallet` for live balances, per-coin payout
+   addresses, a manual **Withdraw** (sweeps the full balance in one tx), and
+   an **auto-withdraw** USD threshold that sweeps automatically.
+4. Override packages with `TOPUP_PACKAGES`, e.g.
+   `[{"coins": 1, "usd": 2}, {"coins": 7, "usd": 10}]`.
+
+Treat the hot wallet as a working float: set a payout address and sweep
+regularly. No third party, no fees beyond normal network fees, and the seed
+never leaves your environment variables.
+
 ## Notes
 
 - `/buy` is intentionally a no-op for now. Reseller balances and purchasing will

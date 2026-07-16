@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
+from payments import TopUpView, WalletAdminView, fmt_usd, wallet_admin_embed
 
 log = logging.getLogger("reseller-bot.coins")
 
@@ -779,6 +780,25 @@ class CoinMenuView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Top Up", emoji="\U0001F4B3", style=discord.ButtonStyle.success, row=2)
+    async def topup_btn(self, interaction, button):
+        payments = self.cog.bot.get_cog("PaymentsCog")
+        if payments is None or not payments.enabled:
+            await interaction.response.send_message(
+                "Top-ups aren't configured yet (an admin must set `HOT_WALLET_MNEMONIC`).",
+                ephemeral=True,
+            )
+            return
+        packages = " \u00b7 ".join(
+            f"**{p['coins']}** for {fmt_usd(p['usd'])}" for p in config.TOPUP_PACKAGES
+        )
+        await interaction.response.send_message(
+            f"\U0001F4B3 **Buy {config.COIN_NAME}s with crypto** (BTC / ETH / SOL / LTC)\n"
+            f"{packages}\n\nPick a package, then the coin you want to pay with:",
+            view=TopUpView(payments, interaction.user.id),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Pay", emoji="\U0001F381", style=discord.ButtonStyle.secondary, row=1)
     async def pay_btn(self, interaction, button):
         await interaction.response.send_message(
@@ -801,7 +821,8 @@ async def hub_embed(cog, interaction):
             f"**{hours:g}h** online with `{settings['required_status']}` in your status.\n"
             f"Spend them in the **Store**, try your luck with **Coinflip** / **Dice** "
             f"({config.GAMBLE_WIN_CHANCE:.0%} win, {config.GAMBLE_MULTIPLIER:g}x, "
-            f"max bet {config.GAMBLE_MAX_BET}), or **Pay** a friend."
+            f"max bet {config.GAMBLE_MAX_BET}), **Pay** a friend, or **Top Up** "
+            f"with crypto (BTC / ETH / SOL / LTC)."
         ),
     )
 
@@ -872,6 +893,22 @@ class CoinAdminGroup(app_commands.Group):
         await interaction.response.send_message(
             f"Reward announcements {'go to ' + channel.mention if channel else 'are disabled'}.",
             ephemeral=True,
+        )
+
+    @app_commands.command(name="wallet", description="Hot wallet: balances, payout addresses, withdrawals")
+    async def wallet(self, interaction):
+        payments = self.cog.bot.get_cog("PaymentsCog")
+        if payments is None or not payments.enabled:
+            await interaction.response.send_message(
+                "Top-ups aren't configured: set the `HOT_WALLET_MNEMONIC` env var "
+                "(the bot logs a freshly generated seed on boot).",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = await wallet_admin_embed(payments)
+        await interaction.followup.send(
+            embed=embed, view=WalletAdminView(payments, interaction.user.id), ephemeral=True
         )
 
     @app_commands.command(name="settings", description="View current coin settings")

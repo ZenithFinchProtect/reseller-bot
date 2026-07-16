@@ -26,6 +26,7 @@ from discord.ext import commands, tasks
 
 import coins
 import config
+import payments
 from db import Database
 from relay import RelayServer
 from web_api import CoinApi
@@ -171,6 +172,7 @@ class ResellerBot(commands.Bot):
         await self.db.connect()
         self.session = aiohttp.ClientSession()
         await coins.setup(self)
+        await payments.setup(self)
         await self._start_web_server()
         # Always keep the commands registered globally (so the bot can handle
         # interactions in any scope). If GUILD_ID is set, also register them to
